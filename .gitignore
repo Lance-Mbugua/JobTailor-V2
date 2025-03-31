@@ -1,1 +1,4 @@
-"node_modules\n.env.local\n*.log" 
+node_modules
+.env.local
+*.log
+build

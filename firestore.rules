@@ -4,16 +4,21 @@ service cloud.firestore {
     match /users/{uid} {
       allow read, write: if request.auth != null && request.auth.uid == uid;
       allow update: if request.auth == null 
-                    && request.resource.data.keys().hasAll(['paidSubscription', 'totalTokens'])
+                    && request.resource.data.keys().hasAll(['paidSubscription'])
                     && request.resource.data.paidSubscription is bool
-                    && request.resource.data.totalTokens is number
                     && 'email' in resource.data;
+    }
+    match /users/{uid}/usage/tokens {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+      allow update: if request.auth == null 
+                    && request.resource.data.keys().hasAll(['totalTokens'])
+                    && request.resource.data.totalTokens is number;
     }
     match /users/{uid}/{collection=**} {
       allow read, write: if request.auth != null && request.auth.uid == uid;
     }
     match /devices/{deviceId} {
-      allow read, write: if request.auth != null;
+      allow read, write: if request.auth != null || request.resource.data.trialUsed is bool;
     }
   }
 }

@@ -34,11 +34,8 @@ module.exports = async (req, res) => {
             }
 
             const userDoc = usersSnapshot.docs[0];
-            await setDoc(
-                doc(db, 'users', userDoc.id),
-                { paidSubscription: true, totalTokens: 0 },
-                { merge: true }
-            );
+            await setDoc(doc(db, 'users', userDoc.id), { paidSubscription: true }, { merge: true });
+            await setDoc(doc(db, 'users', userDoc.id, 'usage', 'tokens'), { totalTokens: 0 }, { merge: true });
             console.log('Updated user:', userDoc.id);
         } else if (event.type === 'customer.subscription.deleted') {
             const email = event.data.object.customer_email.toLowerCase();

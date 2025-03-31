@@ -4,11 +4,10 @@
     "private": true,
     "dependencies": {
         "@ai-sdk/xai": "^1.2.2",
-        "@fingerprintjs/fingerprintjs": "^4.0.0",
         "@stripe/stripe-js": "^6.1.0",
         "autoprefixer": "^10.4.21",
-        "axios": "^1.8.4",
         "firebase": "^10.14.1",
+        "fingerprintjs2": "^2.1.4",
         "jspdf": "^2.5.2",
         "postcss": "^8.5.3",
         "react": "^18.3.1",
