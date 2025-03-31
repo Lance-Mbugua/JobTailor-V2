@@ -1,0 +1,19 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{uid} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+      allow update: if request.auth == null 
+                    && request.resource.data.keys().hasAll(['paidSubscription', 'totalTokens'])
+                    && request.resource.data.paidSubscription is bool
+                    && request.resource.data.totalTokens is number
+                    && 'email' in resource.data;
+    }
+    match /users/{uid}/{collection=**} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+    match /devices/{deviceId} {
+      allow read, write: if request.auth != null;
+    }
+  }
+}
