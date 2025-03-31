@@ -1,6 +1,7 @@
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { db } = require('../src/firebase');
 const { doc, setDoc, getDocs, query, collection, where } = require('firebase/firestore');
+const { buffer } = require('micro');
 
 module.exports = async (req, res) => {
     if (!process.env.STRIPE_SECRET_KEY || !process.env.STRIPE_WEBHOOK_SECRET) {
@@ -16,8 +17,10 @@ module.exports = async (req, res) => {
     const sig = req.headers['stripe-signature'];
     const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
+    let rawBody;
     try {
-        const event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+        rawBody = await buffer(req); // Get raw body buffer
+        const event = stripe.webhooks.constructEvent(rawBody, sig, webhookSecret);
         console.log('Event type:', event.type);
 
         if (event.type === 'checkout.session.completed') {
