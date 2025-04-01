@@ -4,12 +4,12 @@ import { doc, onSnapshot, setDoc, collection, getDocs, deleteDoc, updateDoc, get
 import { signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, sendEmailVerification, onAuthStateChanged } from 'firebase/auth';
 import { loadStripe } from '@stripe/stripe-js';
 import { jsPDF } from 'jspdf';
-import { createXAI } from '@ai-sdk/xai';
+import { createXai } from '@ai-sdk/xai';
 import Fingerprint2 from 'fingerprintjs2';
 
 const TOKEN_LIMIT = 10000;
 const STRIPE_PUBLIC_KEY = process.env.REACT_APP_STRIPE_PUBLIC_KEY;
-const xai = createXAI({ apiKey: process.env.REACT_APP_XAI_API_KEY });
+const xai = createXai({ apiKey: process.env.REACT_APP_XAI_API_KEY });
 
 function App() {
     const [user, setUser] = useState(null);
