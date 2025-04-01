@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { db, auth } from './firebase';
-import { doc, onSnapshot, setDoc, collection, getDocs, deleteDoc, updateDoc, getDoc, addDoc } from 'firebase/firestore';
+import { doc, setDoc, collection, getDocs, deleteDoc, updateDoc, getDoc, addDoc } from 'firebase/firestore';
 import { signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, sendEmailVerification, onAuthStateChanged } from 'firebase/auth';
 import { loadStripe } from '@stripe/stripe-js';
 import { jsPDF } from 'jspdf';
@@ -49,7 +49,7 @@ function App() {
         });
 
         return () => unsubscribe();
-    }, []);
+    }, [userUsage]);
 
     useEffect(() => {
         if (!user) return;
@@ -62,7 +62,7 @@ function App() {
                 window.history.replaceState({}, document.title, '/');
             }).catch((error) => console.error('Token refresh error:', error.message));
         }
-    }, [user]);
+    }, [user, checkDeviceTrial]);
 
     const fetchApplications = async (uid) => {
         try {
@@ -185,7 +185,7 @@ function App() {
 
         try {
             const response = await xai.chat.completions.create({
-                model: 'grok-2-latest', // Confirm with xAI docs
+                model: 'grok-2-1212', // Confirm with xAI docs
                 messages: [
                     {
                         role: 'system',
