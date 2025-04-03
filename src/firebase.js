@@ -1,6 +1,6 @@
-import { initializeApp, getApps } from 'firebase/app';
-import { getFirestore } from 'firebase/firestore';
-import { getAuth, setPersistence, browserLocalPersistence } from 'firebase/auth';
+import { initializeApp } from "firebase/app";
+import { getFirestore } from "firebase/firestore";
+import { getAuth, setPersistence, browserLocalPersistence } from "firebase/auth";
 
 const firebaseConfig = {
     apiKey: process.env.REACT_APP_FIREBASE_API_KEY,
@@ -9,22 +9,23 @@ const firebaseConfig = {
     storageBucket: process.env.REACT_APP_FIREBASE_STORAGE_BUCKET,
     messagingSenderId: process.env.REACT_APP_FIREBASE_MESSAGING_SENDER_ID,
     appId: process.env.REACT_APP_FIREBASE_APP_ID,
-    measurementId: process.env.REACT_APP_FIREBASE_MEASUREMENT_ID,
+    measurementId: process.env.REACT_APP_FIREBASE_MEASUREMENT_ID
 };
 
-if (!Object.values(firebaseConfig).every(Boolean)) {
-    throw new Error('Firebase configuration missing in environment variables');
+let app;
+try {
+    app = initializeApp(firebaseConfig);
+    console.log('Firebase initialized successfully');
+} catch (error) {
+    console.error('Firebase init error:', error.message);
+    throw error; // Handled in App.js
 }
-
-const app = !getApps().length ? initializeApp(firebaseConfig) : getApps()[0];
-console.log('Firebase initialized');
 
 const auth = getAuth(app);
 const db = getFirestore(app);
 
-setPersistence(auth, browserLocalPersistence).catch((error) => {
-    console.error('Persistence error:', error.message);
-    throw error;
-});
+setPersistence(auth, browserLocalPersistence)
+    .then(() => console.log('Auth persistence set to local'))
+    .catch(error => console.error('Persistence error:', error.message));
 
 export { db, auth };

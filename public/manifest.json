@@ -1,8 +1,15 @@
 {
-    "short_name": "JobTailor",
     "name": "JobTailor",
-    "start_url": ".",
+    "short_name": "JobTailor",
+    "start_url": "/",
     "display": "standalone",
-    "theme_color": "#4f46e5",
-    "background_color": "#f9fafb"
+    "background_color": "#ffffff",
+    "theme_color": "#6366F1",
+    "icons": [
+        {
+            "src": "/icon.png",
+            "sizes": "192x192",
+            "type": "image/png"
+        }
+    ]
 }

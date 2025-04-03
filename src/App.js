@@ -1,15 +1,13 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { db, auth } from './firebase';
-import { doc, setDoc, collection, getDocs, deleteDoc, updateDoc, getDoc, addDoc } from 'firebase/firestore';
-import { signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, sendEmailVerification, onAuthStateChanged } from 'firebase/auth';
-import { loadStripe } from '@stripe/stripe-js';
+import { collection, addDoc, getDocs, deleteDoc, doc, updateDoc, getDoc, setDoc } from 'firebase/firestore';
+import { signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, sendEmailVerification, setPersistence, browserLocalPersistence } from 'firebase/auth';
 import { jsPDF } from 'jspdf';
-import { createXai } from '@ai-sdk/xai';
+import axios from 'axios';
+import { loadStripe } from '@stripe/stripe-js';
 import Fingerprint2 from 'fingerprintjs2';
 
-const TOKEN_LIMIT = 10000;
-const STRIPE_PUBLIC_KEY = process.env.REACT_APP_STRIPE_PUBLIC_KEY;
-const xai = createXai({ apiKey: process.env.REACT_APP_XAI_API_KEY });
+const stripePromise = loadStripe(process.env.REACT_APP_STRIPE_PUBLIC_KEY);
 
 function App() {
     const [user, setUser] = useState(null);
@@ -23,187 +21,163 @@ function App() {
     const [userUsage, setUserUsage] = useState(null);
     const [isVerified, setIsVerified] = useState(false);
     const [deviceId, setDeviceId] = useState(null);
-    const [loading, setLoading] = useState(true);
+    const [isGuest, setIsGuest] = useState(false);
+    const [selectedModel, setSelectedModel] = useState('grok-2-latest');
+
+    const XAI_API_KEY = process.env.REACT_APP_XAI_API_KEY;
 
     useEffect(() => {
-        const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
-            setUser(currentUser);
-            setLoading(false);
-            if (currentUser) {
-                setIsVerified(currentUser.emailVerified);
-                await fetchApplications(currentUser.uid);
-                await fetchUsage(currentUser.uid);
-                if (currentUser.emailVerified && !userUsage) {
-                    await setDoc(doc(db, 'users', currentUser.uid), { paidSubscription: false, email: currentUser.email.toLowerCase() }, { merge: true });
-                }
-            } else {
-                setApplications([]);
-                setUserUsage(null);
-            }
-        });
-
-        Fingerprint2.get((components) => {
-            const values = components.map((c) => c.value);
-            const fingerprint = Fingerprint2.x64hash128(values.join(''), 31);
-            setDeviceId(fingerprint);
-        });
-
-        return () => unsubscribe();
-    }, [userUsage]);
-
-    useEffect(() => {
-        if (!user) return;
         const urlParams = new URLSearchParams(window.location.search);
         const success = urlParams.get('success');
-        if (success === 'true') {
-            user.getIdToken(true).then(async () => {
-                await fetchUsage(user.uid);
-                await checkDeviceTrial();
-                window.history.replaceState({}, document.title, '/');
-            }).catch((error) => console.error('Token refresh error:', error.message));
+        if (success === 'true' && user) {
+            auth.currentUser.getIdToken(true);
+            fetchUsage();
+            window.history.replaceState({}, document.title, '/');
         }
-    }, [user, checkDeviceTrial]);
 
-    const fetchApplications = async (uid) => {
-        try {
-            const appsSnapshot = await getDocs(collection(db, `users/${uid}/applications`));
-            const apps = appsSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
-            setApplications(apps);
-        } catch (error) {
-            console.error('Fetch applications error:', error.message);
+        Fingerprint2.get(components => {
+            const values = components.map(c => c.value);
+            const fingerprint = Fingerprint2.x64hash128(values.join(''), 31);
+            setDeviceId(fingerprint);
+            checkDeviceTrial(fingerprint);
+        });
+
+        if (user) {
+            checkVerification();
+            fetchApplications();
+            fetchUsage();
         }
-    };
+    }, [user]);
 
-    const fetchUsage = async (uid) => {
-        try {
-            const usageDoc = await getDoc(doc(db, `users/${uid}/usage`, 'tokens'));
-            const userDoc = await getDoc(doc(db, 'users', uid));
-            const usageData = usageDoc.exists() ? usageDoc.data() : { totalTokens: 0 };
-            const userData = userDoc.exists() ? userDoc.data() : { paidSubscription: false };
-            setUserUsage({ totalTokens: usageData.totalTokens, paidSubscription: userData.paidSubscription });
-        } catch (error) {
-            console.error('Fetch usage error:', error.message);
+    const checkVerification = async () => {
+        await user.reload();
+        setIsVerified(user.emailVerified);
+        if (user.emailVerified && !userUsage) {
+            await setDoc(doc(db, `users/${user.uid}`), { paidSubscription: false, email: user.email, tokensGranted: true }, { merge: true });
+            await setDoc(doc(db, `users/${user.uid}/usage`, 'tokens'), { totalTokens: 0 });
         }
     };
 
-    const checkDeviceTrial = async () => {
-        if (!deviceId || !user || !userUsage) return;
-        try {
-            const deviceDoc = await getDoc(doc(db, 'devices', deviceId));
-            if (deviceDoc.exists()) {
-                const deviceData = deviceDoc.data();
-                const existingUid = deviceData.uid;
-                const usageDoc = await getDoc(doc(db, `users/${existingUid}/usage`, 'tokens'));
-                const totalTokens = usageDoc.exists() ? usageDoc.data().totalTokens : 0;
+    const fetchApplications = async () => {
+        const appsSnapshot = await getDocs(collection(db, `users/${user.uid}/applications`));
+        setApplications(appsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+    };
 
-                if (existingUid !== user.uid) {
-                    if (!userUsage.paidSubscription && totalTokens >= TOKEN_LIMIT) {
-                        alert(`Trial limit of ${TOKEN_LIMIT} tokens already used on this device. Please subscribe.`);
-                        setUserUsage({ totalTokens, paidSubscription: false });
-                        await signOut(auth);
-                        setUser(null);
-                    } else {
-                        if (!userUsage.paidSubscription) {
-                            await setDoc(doc(db, `users/${user.uid}/usage`, 'tokens'), { totalTokens }, { merge: true });
-                            setUserUsage({ totalTokens, paidSubscription: userUsage.paidSubscription });
-                        }
-                        await updateDoc(doc(db, 'devices', deviceId), { uid: user.uid });
-                    }
-                } else if (!userUsage.paidSubscription && totalTokens >= TOKEN_LIMIT) {
-                    alert(`Trial limit of ${TOKEN_LIMIT} tokens reached. Please subscribe.`);
-                    setUserUsage({ totalTokens, paidSubscription: false });
-                }
-            } else {
-                await setDoc(doc(db, 'devices', deviceId), { trialUsed: true, uid: user.uid, timestamp: new Date().toISOString() });
-                if (!userUsage?.paidSubscription && !userUsage?.totalTokens) {
-                    await setDoc(doc(db, `users/${user.uid}/usage`, 'tokens'), { totalTokens: 0 }, { merge: true });
-                    setUserUsage({ totalTokens: 0, paidSubscription: false });
-                }
-            }
-        } catch (error) {
-            console.error('Check device trial error:', error.message);
+    const fetchUsage = async () => {
+        const usageDoc = await getDoc(doc(db, `users/${user.uid}/usage`, 'tokens'));
+        const userDoc = await getDoc(doc(db, `users/${user.uid}`));
+        const usageData = usageDoc.exists() ? usageDoc.data() : { totalTokens: 0 };
+        const userData = userDoc.exists() ? userDoc.data() : { paidSubscription: false };
+        setUserUsage({ totalTokens: usageData.totalTokens, paidSubscription: userData.paidSubscription });
+    };
+
+    const checkDeviceTrial = async (fingerprint) => {
+        if (!fingerprint) return;
+        const deviceDoc = await getDoc(doc(db, 'devices', fingerprint));
+        if (deviceDoc.exists()) {
+            if (!user && !isGuest) setIsGuest(true); // Allow guest mode if trial unused
+        } else {
+            await setDoc(doc(db, 'devices', fingerprint), { trialUsed: false, timestamp: new Date().toISOString() });
         }
     };
 
     const login = async () => {
         try {
+            await setPersistence(auth, browserLocalPersistence);
             const userCredential = await signInWithEmailAndPassword(auth, email, password);
             setUser(userCredential.user);
-            setEmail('');
-            setPassword('');
         } catch (error) {
-            console.error('Login error:', error.message);
-            alert(`Login failed: ${error.message}`);
+            alert('Login failed: ' + error.message);
         }
     };
 
     const signup = async () => {
         try {
+            await setPersistence(auth, browserLocalPersistence);
             const userCredential = await createUserWithEmailAndPassword(auth, email, password);
             await sendEmailVerification(userCredential.user);
-            await setDoc(doc(db, 'users', userCredential.user.uid), {
-                email: email.toLowerCase(),
+            await setDoc(doc(db, `users/${userCredential.user.uid}`), {
+                email: email,
                 paidSubscription: false,
+                tokensGranted: true
             }, { merge: true });
-            setUser(userCredential.user);
-            setEmail('');
-            setPassword('');
+            await setDoc(doc(db, `users/${userCredential.user.uid}/usage`, 'tokens'), { totalTokens: 0 });
             alert('Verification email sent. Please check your inbox.');
+            setUser(userCredential.user);
         } catch (error) {
-            console.error('Signup error:', error.message);
-            alert(`Signup failed: ${error.message}`);
-        }
-    };
-
-    const resendVerification = async () => {
-        try {
-            await sendEmailVerification(user);
-            alert('Verification email resent. Please check your inbox.');
-        } catch (error) {
-            console.error('Resend error:', error.message);
-            alert(`Failed to resend verification email: ${error.message}`);
+            alert('Signup failed: ' + error.message);
         }
     };
 
     const logout = async () => {
         await signOut(auth);
         setUser(null);
+        setIsGuest(false);
     };
 
     const generateDocs = async () => {
-        if (!isVerified) return alert('Please verify your email first.');
+        if (user && !isVerified) return alert('Please verify your email first.');
         if (!jd) return alert('Please paste a job description.');
-        if (!userUsage || !deviceId) return;
-        if (!userUsage.paidSubscription && userUsage.totalTokens >= TOKEN_LIMIT) {
-            alert(`Trial limit of ${TOKEN_LIMIT} tokens reached. Please subscribe.`);
-            return;
+        if (!deviceId) return;
+
+        if (user) {
+            if (!userUsage) return;
+            if (userUsage.totalTokens >= 5000 && !userUsage.paidSubscription) {
+                alert('Trial limit of 5,000 tokens reached. Please subscribe.');
+                return;
+            }
+        } else if (isGuest) {
+            const deviceDoc = await getDoc(doc(db, 'devices', deviceId));
+            if (deviceDoc.data().trialUsed) {
+                alert('Guest trial already used on this device. Please sign up.');
+                return;
+            }
         }
 
         const refinedJd = jd.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').replace(/(\n|^)[^\w\n]+/g, '\n').trim();
         const refinedResume = masterResume ? masterResume.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim() : 'No master resume provided';
         const currentDate = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
 
-        try {
-            const response = await xai.chat.completions.create({
-                model: 'grok-2-1212', // Confirm with xAI docs
-                messages: [
+        const attemptRequest = async (retries = 3) => {
+            try {
+                const response = await axios.post(
+                    'https://api.x.ai/v1/chat/completions',
                     {
-                        role: 'system',
-                        content: `You are an expert resume writer. Using the job description and master resume provided, create a professional resume and cover letter tailored to the job that will help the candidate stand out. Match their skills and experience to the job requirements clearly. Write in a natural, human tone—avoid AI-sounding phrases like "versatile," "dive in," or "leverage." First, analyze the job description to identify the exact job title and hiring company name. Then, use markdown with four sections: "## Job Title" for the identified job title, "## Company" for the identified hiring company, "## Resume" for the resume, and "## Cover Letter" for the cover letter. For the cover letter, include the date as "${currentDate}" under the candidate’s contact info. If the job title or company is unclear, infer them logically from the description. Output only these sections, no extra text.`,
+                        messages: [
+                            {
+                                role: 'system',
+                                content: `You are an expert resume writer. Using the job description and master resume provided, create a professional resume and cover letter tailored to the job that will help the candidate stand out. Match their skills and experience to the job requirements clearly. Write in a natural, human tone—avoid AI-sounding phrases like "versatile," "dive in," or "leverage." First, analyze the job description to identify the exact job title and hiring company name. Then, use markdown with four sections: "## Job Title" for the identified job title, "## Company" for the identified hiring company, "## Resume" for the resume, and "## Cover Letter" for the cover letter. For the cover letter, include the date as "${currentDate}" under the candidate’s contact info. If the job title or company is unclear, infer them logically from the description. Output only these sections, no extra text.`
+                            },
+                            { role: 'user', content: `Job Description: ${refinedJd}\nMaster Resume: ${refinedResume}` }
+                        ],
+                        model: selectedModel,
+                        max_tokens: 1500,
+                        temperature: 0.5,
+                        stream: false
                     },
-                    { role: 'user', content: `Job Description: ${refinedJd}\nMaster Resume: ${refinedResume}` },
-                ],
-                max_tokens: 1500,
-                temperature: 0.5,
-            });
+                    { headers: { 'Authorization': `Bearer ${XAI_API_KEY}`, 'Content-Type': 'application/json' } }
+                );
 
-            const grokResponse = response.choices[0].message.content;
-            const usage = response.usage;
+                return response;
+            } catch (error) {
+                if (retries > 0) {
+                    console.log(`Retrying... (${retries} attempts left)`);
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    return attemptRequest(retries - 1);
+                }
+                throw error;
+            }
+        };
+
+        try {
+            const response = await attemptRequest();
+            const grokResponse = response.data.choices[0].message.content;
+            const usage = response.data.usage;
 
             const jobTitleMatch = grokResponse.match(/## Job Title\n([\s\S]*?)(?=## Company|$)/);
             const companyMatch = grokResponse.match(/## Company\n([\s\S]*?)(?=## Resume|$)/);
             const resumeMatch = grokResponse.match(/## Resume\n([\s\S]*?)(?=## Cover Letter|$)/);
-            const coverLetterMatch = grokResponse.match(/## Cover Letter\n([\s\S]*$)/);
+            const coverLetterMatch = grokResponse.match(/## Cover Letter\n([\s\S]*)$/);
 
             const jobTitle = jobTitleMatch ? jobTitleMatch[1].trim() : 'Untitled Job';
             const company = companyMatch ? companyMatch[1].trim() : 'Unknown';
@@ -215,17 +189,20 @@ function App() {
 
             setResume(generatedResume);
             setCoverLetter(generatedCoverLetter);
-            await saveApplication(generatedResume, generatedCoverLetter, jobTitle, company, usage);
+            if (user) saveApplication(generatedResume, generatedCoverLetter, jobTitle, company, usage);
+            if (isGuest) {
+                await updateDoc(doc(db, 'devices', deviceId), { trialUsed: true });
+            }
         } catch (error) {
-            console.error('AI generation error:', error.message);
-            alert(`Failed to generate documents: ${error.message}`);
+            console.error('Grok API error:', error.response?.data || error.message);
+            alert('Failed to generate documents: ' + (error.response?.data?.error?.message || error.message));
         }
     };
 
     const saveApplication = async (generatedResume, generatedCoverLetter, jobTitle, company, usage) => {
         const newTotal = (userUsage.totalTokens || 0) + usage.total_tokens;
-        await setDoc(doc(db, `users/${user.uid}/usage`, 'tokens'), { totalTokens: newTotal }, { merge: true });
-        setUserUsage((prev) => ({ ...prev, totalTokens: newTotal }));
+        await setDoc(doc(db, `users/${user.uid}/usage`, 'tokens'), { totalTokens: newTotal });
+        setUserUsage({ ...userUsage, totalTokens: newTotal });
 
         const appData = {
             userId: user.uid,
@@ -236,37 +213,31 @@ function App() {
             status: 'Draft',
             company,
             title: jobTitle,
-            tokenUsage: usage,
+            tokenUsage: usage
         };
         const docRef = await addDoc(collection(db, `users/${user.uid}/applications`), appData);
-        setApplications((prev) => [...prev, { id: docRef.id, ...appData }]);
+        setApplications([...applications, { id: docRef.id, ...appData }]);
         setJd('');
     };
 
     const downloadPDF = (content, filename) => {
         const doc = new jsPDF({ orientation: 'portrait', unit: 'pt', format: 'a4' });
-        const margin = 20;
-        const pageWidth = doc.internal.pageSize.width - 2 * margin;
-        const pageHeight = doc.internal.pageSize.height - 2 * margin;
-        let fontSize = 12;
         doc.setFont('helvetica');
-        doc.setFontSize(fontSize);
-
-        const lines = doc.splitTextToSize(content, pageWidth);
-        const lineHeight = fontSize * 1.15;
-        const totalHeight = lines.length * lineHeight;
-
-        if (totalHeight > pageHeight) {
-            fontSize = Math.floor((pageHeight / lines.length) / 1.15);
-            doc.setFontSize(fontSize);
-        }
-
+        doc.setFontSize(10);
+        doc.setLineHeightFactor(1.2);
+        const margin = 40;
+        const pageWidth = doc.internal.pageSize.width;
+        const maxWidth = pageWidth - 2 * margin;
+        const lines = doc.splitTextToSize(content, maxWidth);
         let y = margin;
-        lines.forEach((line) => {
+        lines.forEach(line => {
+            if (y > doc.internal.pageSize.height - margin) {
+                doc.addPage();
+                y = margin;
+            }
             doc.text(line, margin, y);
-            y += fontSize * 1.15;
+            y += 12;
         });
-
         doc.save(filename);
     };
 
@@ -275,35 +246,26 @@ function App() {
 
     const deleteApplication = async (id) => {
         await deleteDoc(doc(db, `users/${user.uid}/applications`, id));
-        setApplications((prev) => prev.filter((app) => app.id !== id));
+        setApplications(applications.filter(app => app.id !== id));
     };
 
     const updateStatus = async (id, newStatus) => {
         await updateDoc(doc(db, `users/${user.uid}/applications`, id), { status: newStatus });
-        setApplications((prev) => prev.map((app) => (app.id === id ? { ...app, status: newStatus } : app)));
+        setApplications(applications.map(app => app.id === id ? { ...app, status: newStatus } : app));
     };
 
     const handleSubscribe = async () => {
+        const stripe = await stripePromise;
         try {
-            const stripe = await loadStripe(STRIPE_PUBLIC_KEY);
-            const response = await fetch('/api/create-checkout-session', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ email: user.email }),
-            });
-            const { success, data, error } = await response.json();
-            if (!success) throw new Error(error);
-            const result = await stripe.redirectToCheckout({ sessionId: data.id });
-            if (result.error) throw new Error(result.error.message);
+            const response = await axios.post('/api/create-checkout-session', { email: user.email, uid: user.uid });
+            const session = response.data;
+            await stripe.redirectToCheckout({ sessionId: session.id });
         } catch (error) {
-            console.error('Subscribe error:', error.message);
-            alert(`Subscription failed: ${error.message}`);
+            alert('Subscription failed: ' + error.message);
         }
     };
 
-    if (loading) return <div className="min-h-screen flex items-center justify-center">Loading...</div>;
-
-    if (!user) {
+    if (!user && !isGuest) {
         return (
             <div className="min-h-screen bg-gray-50 flex items-center justify-center p-6">
                 <div className="w-full max-w-md bg-white p-8 rounded-xl shadow-lg">
@@ -322,19 +284,19 @@ function App() {
                         className="w-full p-3 mb-4 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
                     />
                     <button onClick={login} className="w-full bg-indigo-500 text-white p-3 rounded-lg hover:bg-indigo-600 transition mb-2">Login</button>
-                    <button onClick={signup} className="w-full bg-green-500 text-white p-3 rounded-lg hover:bg-green-600 transition">Sign Up</button>
+                    <button onClick={signup} className="w-full bg-green-500 text-white p-3 rounded-lg hover:bg-green-600 transition mb-2">Sign Up</button>
+                    <button onClick={() => setIsGuest(true)} className="w-full bg-gray-500 text-white p-3 rounded-lg hover:bg-gray-600 transition">Try Now (Guest)</button>
                 </div>
             </div>
         );
     }
 
-    if (!isVerified) {
+    if (user && !isVerified) {
         return (
             <div className="min-h-screen bg-gray-50 flex items-center justify-center p-6">
                 <div className="w-full max-w-md bg-white p-8 rounded-xl shadow-lg text-center">
                     <h1 className="text-2xl font-bold text-indigo-600 mb-4">Verify Your Email</h1>
                     <p className="text-gray-600 mb-4">A verification email has been sent to {user.email}. Please check your inbox.</p>
-                    <button onClick={resendVerification} className="bg-blue-500 text-white p-2 rounded-lg hover:bg-blue-600 transition mb-4">Resend Email</button>
                     <button onClick={logout} className="bg-red-500 text-white p-2 rounded-lg hover:bg-red-600 transition">Logout</button>
                 </div>
             </div>
@@ -366,6 +328,14 @@ function App() {
                     placeholder="Paste job description here..."
                     className="w-full p-3 h-32 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 mb-4"
                 />
+                <select
+                    value={selectedModel}
+                    onChange={(e) => setSelectedModel(e.target.value)}
+                    className="w-full p-3 mb-4 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                >
+                    <option value="grok-2-latest">Grok (xAI)</option>
+                    <option value="other-model">Other Model (Placeholder)</option>
+                </select>
                 <button onClick={generateDocs} className="w-full bg-indigo-500 text-white p-3 rounded-lg hover:bg-indigo-600 transition">Generate Docs</button>
             </div>
 
@@ -399,51 +369,51 @@ function App() {
                 </div>
             )}
 
-            <div className="max-w-5xl mx-auto bg-white p-6 rounded-xl shadow-lg">
-                <h2 className="text-xl font-semibold text-gray-800 mb-4">Applications & Tracker</h2>
-                {userUsage && (
-                    <div className="mb-4">
-                        <p className="text-sm text-gray-600">
-                            {userUsage.paidSubscription
-                                ? 'Subscribed (Unlimited Use)'
-                                : `Tokens Used: ${userUsage.totalTokens}/${TOKEN_LIMIT} (Trial)`}
-                        </p>
-                        {!userUsage.paidSubscription && userUsage.totalTokens >= TOKEN_LIMIT && (
-                            <button onClick={handleSubscribe} className="mt-2 bg-blue-500 text-white p-2 rounded-lg hover:bg-blue-600 transition">Subscribe Now</button>
-                        )}
-                    </div>
-                )}
-                <ul className="space-y-4">
-                    {applications.map((app) => (
-                        <li key={app.id} className="flex justify-between items-center border-b pb-2">
-                            <div>
-                                <span className="font-medium">{app.title}</span> at {app.company} ({app.status})
-                                <p className="text-sm text-gray-500">{new Date(app.date).toLocaleDateString()}</p>
-                                {app.tokenUsage && <p className="text-xs text-gray-400">Tokens: {app.tokenUsage.total_tokens}</p>}
-                            </div>
-                            <div className="flex space-x-2">
-                                <select
-                                    value={app.status}
-                                    onChange={(e) => updateStatus(app.id, e.target.value)}
-                                    className="p-1 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                                >
-                                    <option value="Draft">Draft</option>
-                                    <option value="Applied">Applied</option>
-                                    <option value="Interview">Interview</option>
-                                    <option value="Rejected">Rejected</option>
-                                    <option value="Offer">Offer</option>
-                                </select>
-                                <button
-                                    onClick={() => deleteApplication(app.id)}
-                                    className="bg-red-500 text-white p-1 rounded-lg hover:bg-red-600 transition"
-                                >
-                                    Delete
-                                </button>
-                            </div>
-                        </li>
-                    ))}
-                </ul>
-            </div>
+            {user && (
+                <div className="max-w-5xl mx-auto bg-white p-6 rounded-xl shadow-lg">
+                    <h2 className="text-xl font-semibold text-gray-800 mb-4">Applications & Tracker</h2>
+                    {userUsage && (
+                        <div className="mb-4">
+                            <p className="text-sm text-gray-600">Tokens Used: {userUsage.totalTokens}/5000 {userUsage.paidSubscription ? '(Subscribed)' : '(Trial)'}</p>
+                            {!userUsage.paidSubscription && userUsage.totalTokens >= 5000 && (
+                                <button onClick={handleSubscribe} className="mt-2 bg-blue-500 text-white p-2 rounded-lg hover:bg-blue-600 transition">Subscribe Now</button>
+                            )}
+                        </div>
+                    )}
+                    <ul className="space-y-4">
+                        {applications.map(app => (
+                            <li key={app.id} className="flex justify-between items-center border-b pb-2">
+                                <div>
+                                    <span className="font-medium">{app.title}</span> at {app.company} ({app.status})
+                                    <p className="text-sm text-gray-500">{new Date(app.date).toLocaleDateString()}</p>
+                                    {app.tokenUsage && (
+                                        <p className="text-xs text-gray-400">Tokens: {app.tokenUsage.total_tokens}</p>
+                                    )}
+                                </div>
+                                <div className="flex space-x-2">
+                                    <select
+                                        value={app.status}
+                                        onChange={(e) => updateStatus(app.id, e.target.value)}
+                                        className="p-1 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                    >
+                                        <option value="Draft">Draft</option>
+                                        <option value="Applied">Applied</option>
+                                        <option value="Interview">Interview</option>
+                                        <option value="Rejected">Rejected</option>
+                                        <option value="Offer">Offer</option>
+                                    </select>
+                                    <button
+                                        onClick={() => deleteApplication(app.id)}
+                                        className="bg-red-500 text-white p-1 rounded-lg hover:bg-red-600 transition"
+                                    >
+                                        Delete
+                                    </button>
+                                </div>
+                            </li>
+                        ))}
+                    </ul>
+                </div>
+            )}
         </div>
     );
 }

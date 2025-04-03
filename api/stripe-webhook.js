@@ -1,65 +1,55 @@
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { db } = require('../src/firebase');
-const { doc, setDoc, getDocs, query, collection, where } = require('firebase/firestore');
-const { buffer } = require('micro');
+const { doc, setDoc } = require('firebase/firestore');
+
+async function buffer(req) {
+    const chunks = [];
+    for await (const chunk of req) {
+        chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+    }
+    return Buffer.concat(chunks);
+}
 
 module.exports = async (req, res) => {
-    if (!process.env.STRIPE_SECRET_KEY || !process.env.STRIPE_WEBHOOK_SECRET) {
-        console.error('Missing Stripe configuration');
-        return res.status(500).json({ success: false, error: 'Server configuration error' });
-    }
-
-    if (req.method !== 'POST') {
-        console.log('Invalid method:', req.method);
-        return res.status(405).json({ success: false, error: 'Method not allowed' });
-    }
-
-    const sig = req.headers['stripe-signature'];
-    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
-
-    let rawBody;
     try {
-        rawBody = await buffer(req); // Get raw body buffer
-        const event = stripe.webhooks.constructEvent(rawBody, sig, webhookSecret);
-        console.log('Event type:', event.type);
-
-        if (event.type === 'checkout.session.completed') {
-            const email = event.data.object.customer_email.toLowerCase();
-            console.log('Processing email:', email);
-
-            const usersQuery = query(collection(db, 'users'), where('email', '==', email));
-            const usersSnapshot = await getDocs(usersQuery);
-            console.log('Query result:', usersSnapshot.size);
-
-            if (usersSnapshot.empty) {
-                console.error('No user found for email:', email);
-                return res.status(200).json({ success: true, message: 'No user to update' });
-            }
-
-            const userDoc = usersSnapshot.docs[0];
-            await setDoc(doc(db, 'users', userDoc.id), { paidSubscription: true }, { merge: true });
-            await setDoc(doc(db, 'users', userDoc.id, 'usage', 'tokens'), { totalTokens: 0 }, { merge: true });
-            console.log('Updated user:', userDoc.id);
-        } else if (event.type === 'customer.subscription.deleted') {
-            const email = event.data.object.customer_email.toLowerCase();
-            const usersQuery = query(collection(db, 'users'), where('email', '==', email));
-            const usersSnapshot = await getDocs(usersQuery);
-
-            if (!usersSnapshot.empty) {
-                const userDoc = usersSnapshot.docs[0];
-                await setDoc(doc(db, 'users', userDoc.id), { paidSubscription: false }, { merge: true });
-                console.log('Subscription canceled for:', userDoc.id);
-            }
-        } else {
-            console.log('Unhandled event:', event.type);
+        if (req.method !== 'POST') {
+            console.log(JSON.stringify({ event: 'method_not_allowed', method: req.method }));
+            return res.status(405).send('Method Not Allowed');
         }
 
-        return res.status(200).json({ success: true, message: 'Event processed' });
+        const sig = req.headers['stripe-signature'];
+        const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+        const rawBody = await buffer(req);
+
+        if (rawBody.length === 0) throw new Error('Empty request body');
+
+        const event = stripe.webhooks.constructEvent(rawBody, sig, webhookSecret);
+        console.log(JSON.stringify({ event: 'webhook_received', type: event.type }));
+
+        if (event.type === 'checkout.session.completed') {
+            const session = event.data.object;
+            const uid = session.metadata.uid;
+
+            const attemptUpdate = async (retries = 3) => {
+                try {
+                    await setDoc(doc(db, 'users', uid), { paidSubscription: true }, { merge: true });
+                    console.log(JSON.stringify({ event: 'subscription_confirmed', uid }));
+                } catch (error) {
+                    if (retries > 0) {
+                        console.log(JSON.stringify({ event: 'retry_update', retries_left: retries }));
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+                        return attemptUpdate(retries - 1);
+                    }
+                    throw error;
+                }
+            };
+
+            await attemptUpdate();
+        }
+
+        res.status(200).send('Webhook processed successfully');
     } catch (error) {
-        console.error('Webhook error:', error.message, error.stack);
-        return res.status(error.type === 'StripeSignatureVerificationError' ? 400 : 500).json({
-            success: false,
-            error: error.message,
-        });
+        console.error(JSON.stringify({ event: 'webhook_error', message: error.message, stack: error.stack }));
+        res.status(500).send(`Server Error: ${error.message}`);
     }
 };

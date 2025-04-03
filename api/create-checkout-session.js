@@ -1,43 +1,34 @@
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 
-const SUCCESS_URL = process.env.SUCCESS_URL || 'http://localhost:3000/?success=true';
-const CANCEL_URL = process.env.CANCEL_URL || 'http://localhost:3000/?canceled=true';
-const PRICE_ID = process.env.STRIPE_PRICE_ID;
-
-const validateEmail = (email) => /^[^@]+@[^@]+\.[^@]+$/.test(email);
-
 module.exports = async (req, res) => {
-    if (!process.env.STRIPE_SECRET_KEY) {
-        console.error('Stripe secret key missing');
-        return res.status(500).json({ success: false, error: 'Server configuration error' });
-    }
+    console.log('STRIPE_SECRET_KEY:', process.env.STRIPE_SECRET_KEY ? 'Loaded' : 'Missing');
+    if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-    if (req.method !== 'POST') {
-        console.log('Method not allowed:', req.method);
-        return res.status(405).json({ success: false, error: 'Method not allowed' });
-    }
+    const { email, uid } = req.body;
+    console.log('Request body:', { email, uid });
 
-    const { email } = req.body;
-    console.log('Request body:', req.body);
-
-    if (!email || !validateEmail(email)) {
-        console.log('Invalid or missing email:', email);
-        return res.status(400).json({ success: false, error: 'Valid email is required' });
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        console.error('Invalid email:', email);
+        return res.status(400).json({ error: 'Invalid email' });
     }
 
     try {
         const session = await stripe.checkout.sessions.create({
             payment_method_types: ['card'],
-            customer_email: email.toLowerCase(),
-            line_items: [{ price: PRICE_ID, quantity: 1 }],
+            customer_email: email,
+            metadata: { uid }, // Pass UID for webhook
+            line_items: [{
+                price: process.env.STRIPE_PRICE_ID,
+                quantity: 1,
+            }],
             mode: 'subscription',
-            success_url: SUCCESS_URL,
-            cancel_url: CANCEL_URL,
+            success_url: process.env.SUCCESS_URL,
+            cancel_url: process.env.CANCEL_URL,
         });
         console.log('Session created:', session.id);
-        return res.status(200).json({ success: true, data: { id: session.id } });
+        res.status(200).json({ id: session.id });
     } catch (error) {
         console.error('Stripe error:', error.message, error.stack);
-        return res.status(500).json({ success: false, error: error.message });
+        res.status(500).json({ error: error.message });
     }
 };
